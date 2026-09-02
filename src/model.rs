@@ -1,4 +1,3 @@
-use std::os::raw::c_char;
 
 // ==========================================
 // 1. ADD ORDER MESSAGES
@@ -8,12 +7,12 @@ use std::os::raw::c_char;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchAddOrder {
-    pub message_type: c_char,       // 'A'
+    pub message_type: u8,       // 'A'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
     pub order_reference: u64,       // Unique order ID
-    pub buy_sell_indicator: c_char, // 'B' = Buy, 'S' = Sell
+    pub buy_sell_indicator: u8, // 'B' = Buy, 'S' = Sell
     pub shares: u32,                // Quantity
     pub stock: [u8; 8],            // Right-padded ASCII symbol
     pub price: u32,                 // Price scaled by 10,000
@@ -23,12 +22,12 @@ pub struct ItchAddOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchAddOrderAttributed {
-    pub message_type: c_char,       // 'F'
+    pub message_type: u8,       // 'F'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
     pub order_reference: u64,       // Unique order ID
-    pub buy_sell_indicator: c_char, // 'B' = Buy, 'S' = Sell
+    pub buy_sell_indicator: u8, // 'B' = Buy, 'S' = Sell
     pub shares: u32,                // Quantity
     pub stock: [u8; 8],            // Right-padded ASCII symbol
     pub price: u32,                 // Price scaled by 10,000
@@ -43,7 +42,7 @@ pub struct ItchAddOrderAttributed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchOrderExecuted {
-    pub message_type: c_char,       // 'E'
+    pub message_type: u8,       // 'E'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
@@ -56,14 +55,14 @@ pub struct ItchOrderExecuted {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchOrderExecutedWithPrice {
-    pub message_type: c_char,       // 'C'
+    pub message_type: u8,       // 'C'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
     pub order_reference: u64,       // Matches original Add Order reference
     pub shares: u32,                // Quantity executed
     pub match_number: u64,          // Unique match execution ID
-    pub printable: c_char,          // 'Y' = Publicly visible, 'N' = Hidden
+    pub printable: u8,          // 'Y' = Publicly visible, 'N' = Hidden
     pub execution_price: u32,       // Non-standard execution price scaled by 10,000
 }
 
@@ -75,7 +74,7 @@ pub struct ItchOrderExecutedWithPrice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchOrderCancel {
-    pub message_type: c_char,       // 'X'
+    pub message_type: u8,       // 'X'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
@@ -87,7 +86,7 @@ pub struct ItchOrderCancel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchOrderDelete {
-    pub message_type: c_char,       // 'D'
+    pub message_type: u8,       // 'D'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
@@ -98,7 +97,7 @@ pub struct ItchOrderDelete {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C, packed)]
 pub struct ItchOrderReplace {
-    pub message_type: c_char,       // 'U'
+    pub message_type: u8,       // 'U'
     pub stock_locate: u16,          // Numeric ticker identifier
     pub tracking_number: u16,       // Internal tracking
     pub timestamp_bytes: [u8; 6],   // Nanoseconds since midnight (48-bit)
@@ -161,4 +160,78 @@ pub fn pack_stock_symbol(symbol: &str) -> Option<[u8; 8]> {
 pub fn unpack_stock_symbol(field: &[u8; 8]) -> &str {
     let end = field.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
     std::str::from_utf8(&field[..end]).unwrap_or("<invalid utf8>")
+}
+
+// ==========================================
+// 4. THE SUM TYPE
+// ==========================================
+
+/// One ITCH message of any type this transmitter speaks.
+///
+/// The seven structs above are a *record* of what NASDAQ specifies; this enum
+/// is what the codec, the generator and the CSV layer actually pass around. It
+/// exists because "an ITCH message" has to be a single type before you can
+/// write `encode(msg: &ItchMessage)` or hold a heterogeneous run of them.
+///
+/// The largest variant is 40 bytes on the wire, so the enum lands at 48 with
+/// discriminant and padding — irrelevant next to a UDP datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItchMessage {
+    AddOrder(ItchAddOrder),
+    AddOrderAttributed(ItchAddOrderAttributed),
+    OrderExecuted(ItchOrderExecuted),
+    OrderExecutedWithPrice(ItchOrderExecutedWithPrice),
+    OrderCancel(ItchOrderCancel),
+    OrderDelete(ItchOrderDelete),
+    OrderReplace(ItchOrderReplace),
+}
+
+impl ItchMessage {
+    /// The leading type byte, which is what a receiver dispatches on.
+    pub fn message_type(&self) -> u8 {
+        match self {
+            ItchMessage::AddOrder(_) => b'A',
+            ItchMessage::AddOrderAttributed(_) => b'F',
+            ItchMessage::OrderExecuted(_) => b'E',
+            ItchMessage::OrderExecutedWithPrice(_) => b'C',
+            ItchMessage::OrderCancel(_) => b'X',
+            ItchMessage::OrderDelete(_) => b'D',
+            ItchMessage::OrderReplace(_) => b'U',
+        }
+    }
+
+    /// Numeric symbol identifier. Note that only 'A' and 'F' carry the ASCII
+    /// ticker — every other message identifies its instrument by locate alone,
+    /// so a receiver has to build the locate → ticker map from the add stream
+    /// (or, on a real feed, from the Stock Directory messages).
+    pub fn stock_locate(&self) -> u16 {
+        match self {
+            ItchMessage::AddOrder(m) => m.stock_locate,
+            ItchMessage::AddOrderAttributed(m) => m.stock_locate,
+            ItchMessage::OrderExecuted(m) => m.stock_locate,
+            ItchMessage::OrderExecutedWithPrice(m) => m.stock_locate,
+            ItchMessage::OrderCancel(m) => m.stock_locate,
+            ItchMessage::OrderDelete(m) => m.stock_locate,
+            ItchMessage::OrderReplace(m) => m.stock_locate,
+        }
+    }
+
+    /// Nanoseconds since midnight, unpacked from the 48-bit field.
+    pub fn timestamp_nanos(&self) -> u64 {
+        let bytes = match self {
+            ItchMessage::AddOrder(m) => m.timestamp_bytes,
+            ItchMessage::AddOrderAttributed(m) => m.timestamp_bytes,
+            ItchMessage::OrderExecuted(m) => m.timestamp_bytes,
+            ItchMessage::OrderExecutedWithPrice(m) => m.timestamp_bytes,
+            ItchMessage::OrderCancel(m) => m.timestamp_bytes,
+            ItchMessage::OrderDelete(m) => m.timestamp_bytes,
+            ItchMessage::OrderReplace(m) => m.timestamp_bytes,
+        };
+        unpack_itch_timestamp(&bytes)
+    }
+
+    /// Encoded size in bytes — always the fixed size for this message type.
+    pub fn wire_len(&self) -> usize {
+        crate::codec::wire_len(self.message_type()).expect("every variant has a wire length")
+    }
 }
