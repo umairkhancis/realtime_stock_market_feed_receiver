@@ -35,7 +35,6 @@ pub mod summary;
 #[cfg(test)]
 pub mod fixtures;
 
-use std::env;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::UdpSocket;
@@ -44,83 +43,17 @@ use std::time::Duration;
 
 use codec::decode_add_order;
 use compare::{compare, print_comparison};
-use detect::{print_detection, Detection};
-use feed::{read_feed, read_symbol_table, write_feed, SymbolMap};
+use detect::{Detection, print_detection};
+use feed::{SymbolMap, read_feed, read_symbol_table, write_feed};
 use formatter::{format_price, hex};
-use model::{unpack_stock_symbol, ItchMessage};
-use receive::{receive, ReceiveConfig};
+use model::{ItchMessage, unpack_stock_symbol};
+use receive::{ReceiveConfig, receive};
 
 pub const DEFAULT_PORT: u16 = 9000;
 
-/// Exit codes, so this is usable from a script or CI.
-pub const EXIT_OK: i32 = 0;
-/// A ground-truth comparison found missing messages.
-pub const EXIT_LOSS: i32 = 1;
+pub type Fallible = Result<(), Box<dyn std::error::Error>>;
 
-const USAGE: &str = "\
-usage: rx <command> [options]
-
-  listen    capture a feed and verify it
-              --port N          (default 9000)
-              --expect N        stop after N datagrams (e.g. 100000)
-              --wait SECS       how long to wait for the first datagram (default 60)
-              --idle-ms N       silence that ends the capture (default 2000)
-              --csv PATH        the transmitter's feed.csv — enables exact verification
-              --symbols PATH    the locate map (default: <csv stem>.symbols.csv, else learned)
-              --dump PATH       write what arrived, in the transmitter's CSV format
-              --focus TICKER    symbol for the volatility column
-              --quiet           skip the summary tables
-
-  summary   describe a captured or generated feed
-              --csv PATH        required
-              --symbols PATH / --focus TICKER
-
-  verify    diff two CSVs offline, without touching the network
-              --csv PATH        what was sent (ground truth)
-              --received PATH   what arrived (from `listen --dump`)
-
-  one       slice 1: receive a single Add Order and print its fields
-              [PORT]            (default 9000)
-
-exit status: 0 = verified, 1 = messages missing, 2 = error.
-
-Typical run, receiver first:
-  rx listen --expect 100000 --csv feed.csv --dump received.csv
-  tx send --csv data/feed.csv --dest <this-host>:9000 --rate 10000";
-
-type Fallible = Result<i32, Box<dyn std::error::Error>>;
-
-pub fn run() -> Fallible {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let (command, rest) = match args.split_first() {
-        None => {
-            println!("{USAGE}");
-            return Ok(EXIT_OK);
-        }
-        Some((c, r)) => (c.as_str(), r),
-    };
-
-    match command {
-        "listen" => cmd_listen(&Args::parse(rest)?),
-        "summary" => cmd_summary(&Args::parse(rest)?),
-        "verify" => cmd_verify(&Args::parse(rest)?),
-        "one" => cmd_one(rest.first().map(String::as_str)),
-        "help" | "-h" | "--help" => {
-            println!("{USAGE}");
-            Ok(EXIT_OK)
-        }
-        // Slice 1 took a bare port as its only argument. Keep that working
-        // rather than failing on a command line that used to be correct.
-        other if other.parse::<u16>().is_ok() => cmd_one(Some(other)),
-        other => Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-fn cmd_listen(args: &Args) -> Fallible {
+pub fn listen(args: &Args) -> Fallible {
     let cfg = ReceiveConfig {
         port: args.parse_or("port", DEFAULT_PORT)?,
         startup_timeout: Duration::from_secs(args.parse_or("wait", 60u64)?),
@@ -145,8 +78,11 @@ fn cmd_listen(args: &Args) -> Fallible {
         if failures.len() > 10 {
             println!("  … {} more", failures.len() - 10);
         }
-        println!("  ({} of {} datagrams did not decode; one bad datagram costs exactly one",
-            failures.len(), report.datagrams);
+        println!(
+            "  ({} of {} datagrams did not decode; one bad datagram costs exactly one",
+            failures.len(),
+            report.datagrams
+        );
         println!("   message, because one datagram is one message)");
     }
 
@@ -157,7 +93,6 @@ fn cmd_listen(args: &Args) -> Fallible {
     print_detection(&detection);
 
     // Then the answer key, when there is one.
-    let mut exit = EXIT_OK;
     if let Some(path) = args.get("csv") {
         let expected = read_feed(BufReader::new(File::open(path)?))?;
         println!();
@@ -165,7 +100,7 @@ fn cmd_listen(args: &Args) -> Fallible {
         let c = compare(&expected, &messages);
         print_comparison(&c);
         if !c.is_perfect() {
-            exit = EXIT_LOSS;
+            return Err(format!("verification failed").into());
         }
     }
 
@@ -183,22 +118,25 @@ fn cmd_listen(args: &Args) -> Fallible {
         println!();
         summary::summarise(&messages, &symbols, args.get("focus"));
     }
-    Ok(exit)
+    Ok(())
 }
 
-fn cmd_summary(args: &Args) -> Fallible {
+pub fn summarise(args: &Args) -> Fallible {
     let path = args.get("csv").ok_or("summary needs --csv PATH")?;
     let messages = read_feed(BufReader::new(File::open(path)?))?;
     println!("read {} messages from {path}", messages.len());
     let symbols = load_symbols(args, &messages)?;
     summary::summarise(&messages, &symbols, args.get("focus"));
-    Ok(EXIT_OK)
+    Ok(())
 }
 
-fn cmd_verify(args: &Args) -> Fallible {
-    let expected_path = args.get("csv").ok_or("verify needs --csv PATH (what was sent)")?;
-    let received_path =
-        args.get("received").ok_or("verify needs --received PATH (what arrived)")?;
+pub fn verify(args: &Args) -> Fallible {
+    let expected_path = args
+        .get("csv")
+        .ok_or("verify needs --csv PATH (what was sent)")?;
+    let received_path = args
+        .get("received")
+        .ok_or("verify needs --received PATH (what arrived)")?;
 
     let expected = read_feed(BufReader::new(File::open(expected_path)?))?;
     let received = read_feed(BufReader::new(File::open(received_path)?))?;
@@ -207,11 +145,11 @@ fn cmd_verify(args: &Args) -> Fallible {
 
     let c = compare(&expected, &received);
     print_comparison(&c);
-    Ok(if c.is_perfect() { EXIT_OK } else { EXIT_LOSS })
+    return Err(format!("verification failed").into());
 }
 
 /// Slice 1, unchanged in behaviour: one Add Order, printed field by field.
-fn cmd_one(port: Option<&str>) -> Fallible {
+pub fn listen_one(port: Option<&str>) -> Fallible {
     let port: u16 = port.unwrap_or("9000").parse()?;
 
     // 0.0.0.0, not 127.0.0.1: binding loopback works perfectly on this machine
@@ -242,11 +180,21 @@ fn cmd_one(port: Option<&str>) -> Fallible {
         (ts / 1_000_000_000) % 60
     );
     println!("  order_reference    {}", { msg.order_reference });
-    println!("  buy_sell_indicator {:?}", char::from(msg.buy_sell_indicator));
+    println!(
+        "  buy_sell_indicator {:?}",
+        char::from(msg.buy_sell_indicator)
+    );
     println!("  shares             {}", { msg.shares });
-    println!("  stock              {:?}", unpack_stock_symbol(&{ msg.stock }));
-    println!("  price              {} (raw {})", format_price(msg.price), { msg.price });
-    Ok(EXIT_OK)
+    println!(
+        "  stock              {:?}",
+        unpack_stock_symbol(&{ msg.stock })
+    );
+    println!(
+        "  price              {} (raw {})",
+        format_price(msg.price),
+        { msg.price }
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -279,25 +227,28 @@ fn load_symbols(
 
 /// `data/feed.csv` -> `data/feed.symbols.csv`, matching the transmitter.
 fn symbols_path(feed: &Path) -> PathBuf {
-    let stem = feed.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = feed
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     feed.with_file_name(format!("{stem}.symbols.csv"))
 }
 
 /// A very small `--key value` / `--key=value` parser, matching the
 /// transmitter's so the two command lines feel like one tool.
-struct Args {
+pub struct Args {
     values: Vec<(String, Option<String>)>,
 }
 
 impl Args {
-    fn parse(argv: &[String]) -> Result<Args, String> {
+    pub fn parse(argv: &[String]) -> Result<Args, String> {
         let mut values = Vec::new();
         let mut i = 0;
         while i < argv.len() {
             let arg = &argv[i];
-            let key = arg.strip_prefix("--").ok_or_else(|| {
-                format!("expected an option starting with --, got {arg:?}\n\n{USAGE}")
-            })?;
+            let key = arg
+                .strip_prefix("--")
+                .ok_or_else(|| format!("expected an option starting with --, got {arg:?}"))?;
             match key.split_once('=') {
                 Some((k, v)) => {
                     values.push((k.to_string(), Some(v.to_string())));
@@ -319,7 +270,10 @@ impl Args {
     }
 
     fn get(&self, key: &str) -> Option<&str> {
-        self.values.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.as_deref())
+        self.values
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.as_deref())
     }
 
     fn has(&self, key: &str) -> bool {
@@ -329,7 +283,9 @@ impl Args {
     fn parse_or<T: std::str::FromStr>(&self, key: &str, default: T) -> Result<T, String> {
         match self.get(key) {
             None => Ok(default),
-            Some(v) => v.parse().map_err(|_| format!("--{key} expects a number, got {v:?}")),
+            Some(v) => v
+                .parse()
+                .map_err(|_| format!("--{key} expects a number, got {v:?}")),
         }
     }
 }
@@ -368,8 +324,14 @@ mod tests {
 
     #[test]
     fn symbols_path_matches_the_transmitters_layout() {
-        assert_eq!(symbols_path(Path::new("data/feed.csv")), Path::new("data/feed.symbols.csv"));
-        assert_eq!(symbols_path(Path::new("run1.csv")), Path::new("run1.symbols.csv"));
+        assert_eq!(
+            symbols_path(Path::new("data/feed.csv")),
+            Path::new("data/feed.symbols.csv")
+        );
+        assert_eq!(
+            symbols_path(Path::new("run1.csv")),
+            Path::new("run1.symbols.csv")
+        );
     }
 
     #[test]
@@ -393,7 +355,10 @@ mod tests {
         let mut dumped: Vec<u8> = Vec::new();
         write_feed(&mut dumped, received.iter().copied()).unwrap();
 
-        assert_eq!(ground_truth, dumped, "a lossless capture must dump an identical file");
+        assert_eq!(
+            ground_truth, dumped,
+            "a lossless capture must dump an identical file"
+        );
         assert!(compare(&sent, &received).is_perfect());
     }
 
