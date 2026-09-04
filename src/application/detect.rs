@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::model::ItchMessage;
+use crate::domain::model::ItchMessage;
 
 /// What a monotonic counter in the stream says about what is missing from it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -251,7 +251,7 @@ impl Detection {
 }
 
 fn ticker_of(field: &[u8; 8]) -> String {
-    crate::model::unpack_stock_symbol(field).to_string()
+    crate::domain::model::unpack_stock_symbol(field).to_string()
 }
 
 fn add_to_book(
@@ -329,7 +329,7 @@ mod tests {
     /// true statement available.
     #[test]
     fn add_and_execution_gaps_count_the_true_loss_exactly() {
-        use crate::model::ItchMessage as M;
+        use crate::domain::model::ItchMessage as M;
         let full = synthetic(20_000);
         let (kept, dropped) = drop_every(&full, 10);
 

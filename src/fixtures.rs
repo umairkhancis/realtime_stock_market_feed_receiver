@@ -2,7 +2,7 @@
 //!
 //! The receiver has no market generator and should not grow one — that is the
 //! transmitter's job, and a receiver that can only be tested against its own
-//! idea of a feed is testing nothing. But the detectors in [`crate::detect`]
+//! idea of a feed is testing nothing. But the detectors in [`crate::application::detect`]
 //! need a stream with known properties *and* a known amount of loss injected
 //! into it, so this builds one.
 //!
@@ -11,7 +11,7 @@
 //! the transmitter's stride — it has to infer it. These fixtures are what
 //! proves it does.
 
-use crate::model::{
+use crate::domain::model::{
     pack_itch_timestamp, pack_stock_symbol, ItchAddOrder, ItchAddOrderAttributed, ItchMessage,
     ItchOrderCancel, ItchOrderDelete, ItchOrderExecuted, ItchOrderExecutedWithPrice,
     ItchOrderReplace,

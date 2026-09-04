@@ -17,9 +17,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::feed::SymbolMap;
-use crate::formatter::format_price;
-use crate::model::ItchMessage;
+use crate::domain::model::ItchMessage;
+use crate::infrastructure::feed::SymbolMap;
+use crate::presentation::formatter::format_price;
 
 /// Timeline granularity, in message-timestamp nanoseconds.
 const BUCKET_NANOS: u64 = 1_000_000_000;

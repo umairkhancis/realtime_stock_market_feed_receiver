@@ -232,6 +232,6 @@ impl ItchMessage {
 
     /// Encoded size in bytes — always the fixed size for this message type.
     pub fn wire_len(&self) -> usize {
-        crate::codec::wire_len(self.message_type()).expect("every variant has a wire length")
+        crate::domain::codec::wire_len(self.message_type()).expect("every variant has a wire length")
     }
 }

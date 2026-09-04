@@ -3,7 +3,7 @@
 //! Two jobs, both against the transmitter's format exactly:
 //!
 //! - **Read** `feed.csv` — the transmitter's ground truth — so what arrived can
-//!   be compared against what was sent, message by message. See [`crate::compare`].
+//!   be compared against what was sent, message by message. See [`crate::application::compare`].
 //! - **Write** what actually arrived, in the *same* 14 columns and the same
 //!   order, so that with zero loss the two files are byte-identical and plain
 //!   `diff` is a complete verification.
@@ -12,7 +12,7 @@
 //! sequence number in slice 2. On the transmitter it is the row's index in the
 //! file; here it is the datagram's index in arrival order. With no loss those
 //! agree, which is the whole point; with loss they diverge from the first gap
-//! onward, which is why [`crate::compare`] exists rather than relying on `diff`.
+//! onward, which is why [`crate::application::compare`] exists rather than relying on `diff`.
 //!
 //! Only 'A' and 'F' carry an ASCII ticker, so the `stock` column is empty for
 //! every other type — exactly as on the wire. [`read_symbol_table`] loads the
@@ -22,7 +22,7 @@ use std::fmt;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
-use crate::model::{
+use crate::domain::model::{
     pack_itch_timestamp, unpack_stock_symbol, ItchAddOrder, ItchAddOrderAttributed, ItchMessage,
     ItchOrderCancel, ItchOrderDelete, ItchOrderExecuted, ItchOrderExecutedWithPrice,
     ItchOrderReplace,
@@ -357,7 +357,7 @@ fn parse_row(line: &str, no: u64) -> Result<ItchMessage, FeedError> {
         }
     };
     let stock = |v: &str| -> Result<[u8; 8], FeedError> {
-        crate::model::pack_stock_symbol(v).ok_or_else(|| FeedError::BadField {
+        crate::domain::model::pack_stock_symbol(v).ok_or_else(|| FeedError::BadField {
             line: no,
             column: "stock",
             value: v.to_string(),
@@ -488,11 +488,11 @@ mod tests {
     #[test]
     fn csv_round_trip_preserves_the_encoded_bytes() {
         let (original, parsed) = round_trip(5_000);
-        let mut a = [0u8; crate::codec::MAX_MESSAGE_LEN];
-        let mut b = [0u8; crate::codec::MAX_MESSAGE_LEN];
+        let mut a = [0u8; crate::domain::codec::MAX_MESSAGE_LEN];
+        let mut b = [0u8; crate::domain::codec::MAX_MESSAGE_LEN];
         for (x, y) in original.iter().zip(parsed.iter()) {
-            let na = crate::codec::encode(x, &mut a).unwrap();
-            let nb = crate::codec::encode(y, &mut b).unwrap();
+            let na = crate::domain::codec::encode(x, &mut a).unwrap();
+            let nb = crate::domain::codec::encode(y, &mut b).unwrap();
             assert_eq!(a[..na], b[..nb]);
         }
     }

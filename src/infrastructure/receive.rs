@@ -28,8 +28,8 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use crate::codec::{decode, wire_len, CodecError, MAX_MESSAGE_LEN};
-use crate::model::ItchMessage;
+use crate::domain::codec::{decode, wire_len, CodecError, MAX_MESSAGE_LEN};
+use crate::domain::model::ItchMessage;
 
 /// Big enough that a jumbo-framed datagram still fits, so `n == buf.len()`
 /// reliably means "something is wrong" rather than "this is a normal big one".
@@ -400,7 +400,7 @@ mod tests {
         let mut capture = Capture::default();
         let mut scratch = [0u8; MAX_MESSAGE_LEN];
         for m in &msgs {
-            let n = crate::codec::encode(m, &mut scratch).unwrap();
+            let n = crate::domain::codec::encode(m, &mut scratch).unwrap();
             capture.index.push((capture.bytes.len() as u32, n as u8));
             capture.bytes.extend_from_slice(&scratch[..n]);
         }
@@ -417,7 +417,7 @@ mod tests {
         let mut capture = Capture::default();
         let mut scratch = [0u8; MAX_MESSAGE_LEN];
         for (i, m) in msgs.iter().enumerate() {
-            let n = crate::codec::encode(m, &mut scratch).unwrap();
+            let n = crate::domain::codec::encode(m, &mut scratch).unwrap();
             if i == 4 {
                 scratch[0] = b'Z'; // a type byte from a version we do not speak
             }
@@ -455,7 +455,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(150));
             let mut scratch = [0u8; MAX_MESSAGE_LEN];
             for m in &crate::fixtures::synthetic(300) {
-                let n = crate::codec::encode(m, &mut scratch).unwrap();
+                let n = crate::domain::codec::encode(m, &mut scratch).unwrap();
                 sock.send_to(&scratch[..n], ("127.0.0.1", port)).unwrap();
                 std::thread::sleep(Duration::from_micros(200));
             }
@@ -475,7 +475,7 @@ mod tests {
         assert!(failures.is_empty());
         // Loopback does not reorder, so what arrived is a prefix-preserving
         // subsequence of what was sent.
-        let c = crate::compare::compare(&msgs, &decoded);
+        let c = crate::application::compare::compare(&msgs, &decoded);
         assert!(c.unexpected.is_empty(), "nothing foreign should appear: {:?}", c.unexpected);
         assert_eq!(c.matched, decoded.len() as u64);
     }

@@ -1,4 +1,4 @@
-use realtime_stock_market_feed_receiver::formatter::dramatic_display;
+use realtime_stock_market_feed_receiver::presentation::formatter::dramatic_display;
 use realtime_stock_market_feed_receiver::{Fallible, listen, listen_one, summarise, verify};
 use std::env;
 use std::process;

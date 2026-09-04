@@ -7,30 +7,48 @@
 //!
 //! There are two ways to answer that, and they are not equivalent:
 //!
-//! - [`detect`] infers loss from the messages themselves — gaps in the order
-//!   reference and match number sequences, dangling references in a replayed
-//!   book. It needs nothing but the stream, which is what a real deployment has.
-//!   It is also blind to roughly a third of the tape, and blind to tail loss.
-//! - [`compare`] diffs what arrived against the transmitter's `feed.csv`. It has
-//!   no blind spot at all, and it only works because this is a synthetic feed
-//!   with an answer key.
+//! - [`application::detect`] infers loss from the messages themselves — gaps in
+//!   the order reference and match number sequences, dangling references in a
+//!   replayed book. It needs nothing but the stream, which is what a real
+//!   deployment has. It is also blind to roughly a third of the tape, and blind
+//!   to tail loss.
+//! - [`application::compare`] diffs what arrived against the transmitter's
+//!   `feed.csv`. It has no blind spot at all, and it only works because this is
+//!   a synthetic feed with an answer key.
 //!
 //! Both run, and the report says which is which. The gap between them is the
 //! measure of what a session layer would buy — see `docs/session-layer.md` in
 //! the transmitter repo.
 //!
-//! `codec.rs` and `model.rs` are byte-identical to the transmitter's copies.
-//! That is deliberate: the golden vector is the wire contract, and it means
-//! nothing if each side keeps its own idea of the offsets.
+//! `domain/codec.rs` and `domain/model.rs` are byte-identical to the
+//! transmitter's copies. That is deliberate: the golden vector is the wire
+//! contract, and it means nothing if each side keeps its own idea of the
+//! offsets.
+//!
+//! # Layout
+//!
+//! The crate is arranged in four concentric layers, and every `use` points
+//! inwards:
+//!
+//! ```text
+//!   main.rs                 CLI adapter: argv in, exit status out
+//!     └── lib.rs            composition root: the four commands, wired here
+//!           ├── presentation   formatter        rendering; figlet + colored live only here
+//!           ├── application    detect, compare, summary
+//!           │                                   the analysis, over &[ItchMessage]
+//!           ├── infrastructure receive, feed    UDP socket; CSV filesystem
+//!           └── domain         model, codec     ITCH entities and the wire contract
+//! ```
+//!
+//! This file is the composition root and the only place the layers meet: it
+//! resolves paths, opens files, drives the socket adapter, hands the decoded
+//! messages to the analysis, and renders the result. Everything below it is
+//! reusable without it.
 
-pub mod codec;
-pub mod compare;
-pub mod detect;
-pub mod feed;
-pub mod formatter;
-pub mod model;
-pub mod receive;
-pub mod summary;
+pub mod application;
+pub mod domain;
+pub mod infrastructure;
+pub mod presentation;
 
 #[cfg(test)]
 pub mod fixtures;
@@ -40,13 +58,14 @@ use std::io::{BufReader, BufWriter, Write};
 use std::net::UdpSocket;
 use std::time::Duration;
 
-use codec::decode_add_order;
-use compare::{compare, print_comparison};
-use detect::{Detection, print_detection};
-use feed::{SymbolMap, read_feed, read_symbol_table, write_feed};
-use formatter::{format_price, hex};
-use model::unpack_stock_symbol;
-use receive::{ReceiveConfig, receive};
+use application::compare::{compare, print_comparison};
+use application::detect::{Detection, print_detection};
+use application::summary;
+use domain::codec::{self, decode_add_order};
+use domain::model::unpack_stock_symbol;
+use infrastructure::feed::{SymbolMap, read_feed, read_symbol_table, write_feed};
+use infrastructure::receive::{self, ReceiveConfig, receive};
+use presentation::formatter::{format_price, hex};
 
 pub const DEFAULT_PORT: u16 = 9000;
 pub const DEFAULT_PATH: &str = "data/feed.symbols.csv";

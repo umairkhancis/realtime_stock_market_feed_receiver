@@ -1,6 +1,6 @@
 //! Message-for-message comparison against the transmitter's CSV.
 //!
-//! Everything in [`crate::detect`] is inference — it works with nothing but the
+//! Everything in [`crate::application::detect`] is inference — it works with nothing but the
 //! stream, which is what a real deployment has, and it is blind to roughly a
 //! third of the tape. This module is the opposite: given `feed.csv`, it says
 //! exactly which messages did not arrive. No inference, no blind spot.
@@ -16,7 +16,7 @@
 //! stamps every message with a distinct timestamp, so no two rows of a feed are
 //! byte-identical.
 
-use crate::model::ItchMessage;
+use crate::domain::model::ItchMessage;
 
 /// How far ahead of the cursor to look for a match before giving up and calling
 /// a message unexpected. Sized to survive a burst loss of ~65k messages —
@@ -125,7 +125,7 @@ mod tests {
     }
 
     /// The definitive property: it names the exact indices, including the `D`
-    /// and `X` messages that [`crate::detect`] cannot see at all.
+    /// and `X` messages that [`crate::application::detect`] cannot see at all.
     #[test]
     fn it_names_every_missing_message_including_the_invisible_ones() {
         let sent = synthetic(5_000);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(c.matched, got.len() as u64);
 
         // The contrast that justifies this module existing at all.
-        assert_eq!(crate::detect::Detection::run(&got).provable_loss(), 0);
+        assert_eq!(crate::application::detect::Detection::run(&got).provable_loss(), 0);
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(c.missing.len(), 500);
         assert!(c.is_tail_truncation());
         assert_eq!(c.gap_runs(), vec![(4_500, 500)]);
-        assert!(crate::detect::Detection::run(&sent[..4_500]).timestamps.is_clean());
+        assert!(crate::application::detect::Detection::run(&sent[..4_500]).timestamps.is_clean());
     }
 
     #[test]
