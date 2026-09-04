@@ -2,19 +2,25 @@
 //!
 //! The receiver has no market generator and should not grow one — that is the
 //! transmitter's job, and a receiver that can only be tested against its own
-//! idea of a feed is testing nothing. But the detectors in [`crate::detect`]
-//! need a stream with known properties *and* a known amount of loss injected
-//! into it, so this builds one.
+//! idea of a feed is testing nothing. But the detectors in
+//! [`crate::domain::loss`] need a stream with known properties *and* a known
+//! amount of loss injected into it, so this builds one.
+//!
+//! It sits in `domain` because it builds nothing but domain values, and it is
+//! `#[cfg(test)]` because a receiver that ships a feed generator is a receiver
+//! that will eventually be tested against itself. That is also why the two
+//! cross-layer properties this crate cares about stay unit tests rather than
+//! moving to `tests/`: promoting them would mean publishing this module.
 //!
 //! Deliberately unlike the transmitter in one way: four symbols, so order
 //! references stride by 4 rather than 8. Nothing in the receiver may hardcode
 //! the transmitter's stride — it has to infer it. These fixtures are what
 //! proves it does.
 
-use crate::model::{
-    pack_itch_timestamp, pack_stock_symbol, ItchAddOrder, ItchAddOrderAttributed, ItchMessage,
-    ItchOrderCancel, ItchOrderDelete, ItchOrderExecuted, ItchOrderExecutedWithPrice,
-    ItchOrderReplace,
+use crate::domain::message::{
+    ItchAddOrder, ItchAddOrderAttributed, ItchMessage, ItchOrderCancel, ItchOrderDelete,
+    ItchOrderExecuted, ItchOrderExecutedWithPrice, ItchOrderReplace, pack_itch_timestamp,
+    pack_stock_symbol,
 };
 
 pub const SESSION_OPEN_NANOS: u64 = 34_200_000_000_000;

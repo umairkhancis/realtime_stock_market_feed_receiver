@@ -1,6 +1,6 @@
 //! Message-for-message comparison against the transmitter's CSV.
 //!
-//! Everything in [`crate::detect`] is inference — it works with nothing but the
+//! Everything in [`super::detect`] is inference — it works with nothing but the
 //! stream, which is what a real deployment has, and it is blind to roughly a
 //! third of the tape. This module is the opposite: given `feed.csv`, it says
 //! exactly which messages did not arrive. No inference, no blind spot.
@@ -16,7 +16,7 @@
 //! stamps every message with a distinct timestamp, so no two rows of a feed are
 //! byte-identical.
 
-use crate::model::ItchMessage;
+use crate::domain::message::ItchMessage;
 
 /// How far ahead of the cursor to look for a match before giving up and calling
 /// a message unexpected. Sized to survive a burst loss of ~65k messages —
@@ -111,7 +111,7 @@ pub fn compare(expected: &[ItchMessage], received: &[ItchMessage]) -> Comparison
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{drop_every, drop_indices, synthetic};
+    use crate::domain::fixtures::{drop_every, drop_indices, synthetic};
 
     #[test]
     fn a_complete_capture_is_perfect() {
@@ -125,7 +125,7 @@ mod tests {
     }
 
     /// The definitive property: it names the exact indices, including the `D`
-    /// and `X` messages that [`crate::detect`] cannot see at all.
+    /// and `X` messages that [`super::detect`] cannot see at all.
     #[test]
     fn it_names_every_missing_message_including_the_invisible_ones() {
         let sent = synthetic(5_000);
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(c.matched, got.len() as u64);
 
         // The contrast that justifies this module existing at all.
-        assert_eq!(crate::detect::Detection::run(&got).provable_loss(), 0);
+        assert_eq!(crate::domain::loss::detect::Detection::run(&got).provable_loss(), 0);
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(c.missing.len(), 500);
         assert!(c.is_tail_truncation());
         assert_eq!(c.gap_runs(), vec![(4_500, 500)]);
-        assert!(crate::detect::Detection::run(&sent[..4_500]).timestamps.is_clean());
+        assert!(crate::domain::loss::detect::Detection::run(&sent[..4_500]).timestamps.is_clean());
     }
 
     #[test]
@@ -206,62 +206,4 @@ mod tests {
         assert!(c.is_perfect());
         assert_eq!(c.loss_fraction(), 0.0);
     }
-}
-
-/// Prints a ground-truth comparison. This is the report that can actually say
-/// "zero loss" and mean it.
-pub fn print_comparison(c: &Comparison) {
-    println!();
-    println!("== verification against ground truth ==");
-    println!("  expected        {} messages", c.expected);
-    println!("  received        {} messages", c.received);
-    println!("  matched         {} in order", c.matched);
-
-    if c.is_perfect() {
-        println!();
-        println!("  RESULT          0% LOSS — every message sent arrived, in order, byte for byte.");
-        return;
-    }
-
-    println!(
-        "  missing         {} ({:.4}% of the feed)",
-        c.missing.len(),
-        c.loss_fraction() * 100.0
-    );
-    if !c.unexpected.is_empty() {
-        println!(
-            "  unexpected      {} datagrams matched nothing — corruption, reordering beyond \
-             {} messages, or another sender on this port",
-            c.unexpected.len(),
-            SCAN_WINDOW
-        );
-    }
-
-    let runs = c.gap_runs();
-    if !runs.is_empty() {
-        println!(
-            "  gaps            {} runs, largest {} consecutive",
-            runs.len(),
-            c.largest_gap()
-        );
-        print!("  first gaps      ");
-        for (i, (start, len)) in runs.iter().take(8).enumerate() {
-            if i > 0 {
-                print!(", ");
-            }
-            print!("{start}..{}", start + len);
-        }
-        if runs.len() > 8 {
-            print!(", … {} more", runs.len() - 8);
-        }
-        println!();
-    }
-    if c.is_tail_truncation() {
-        println!();
-        println!("  All of it is at the end — the stream stopped early rather than dropping");
-        println!("  messages throughout. A sender that died, or tail loss. This is exactly the");
-        println!("  case no content-based detector can see, which is what heartbeats are for.");
-    }
-    println!();
-    println!("  RESULT          FAILED — {} messages did not arrive.", c.missing.len());
 }

@@ -1,7 +1,7 @@
 //! Wire codec for ITCH 5.0 messages.
 //!
 //! Every field is written explicitly, big-endian, at a fixed offset. The
-//! `#[repr(C, packed)]` layout of the structs in [`crate::model`] is *not* the
+//! `#[repr(C, packed)]` layout of the structs in [`crate::domain::message`] is *not* the
 //! wire format and is never memcpy'd — that is how endianness bugs get in.
 //!
 //! Every ITCH message shares an 11-byte prefix:
@@ -20,9 +20,9 @@
 
 use std::fmt;
 
-use crate::model::{
-    unpack_itch_timestamp, ItchAddOrder, ItchAddOrderAttributed, ItchMessage, ItchOrderCancel,
-    ItchOrderDelete, ItchOrderExecuted, ItchOrderExecutedWithPrice, ItchOrderReplace,
+use crate::domain::message::{
+    ItchAddOrder, ItchAddOrderAttributed, ItchMessage, ItchOrderCancel, ItchOrderDelete,
+    ItchOrderExecuted, ItchOrderExecutedWithPrice, ItchOrderReplace, unpack_itch_timestamp,
 };
 
 /// Bytes shared by every message type before the type-specific body.
@@ -462,7 +462,7 @@ pub fn timestamp_nanos(msg: &ItchAddOrder) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{pack_itch_timestamp, pack_stock_symbol, unpack_stock_symbol};
+    use crate::domain::message::{pack_itch_timestamp, pack_stock_symbol, unpack_stock_symbol};
 
     /// The hand-computed ground truth from `docs/1_SLICE.md`.
     ///
@@ -566,7 +566,10 @@ mod tests {
         let mut buf = [0u8; ADD_ORDER_LEN];
         let n = encode_add_order(&golden_message(), &mut buf).unwrap();
         assert_eq!(n, ADD_ORDER_LEN);
-        assert_eq!(buf, GOLDEN, "\n  got: {}\n  want: {}", crate::hex(&buf), crate::hex(&GOLDEN));
+        // Rendered with Rust's own hex debug format rather than
+        // `presentation::format::hex`: a domain test that reaches out to the
+        // display layer puts a rendering concern inside an enterprise rule.
+        assert_eq!(buf, GOLDEN, "\n  got:  {buf:02X?}\n  want: {GOLDEN:02X?}");
     }
 
     #[test]
@@ -575,7 +578,8 @@ mod tests {
         assert_eq!(msg, golden_message());
         assert_eq!(timestamp_nanos(&msg), 34_200_000_000_000);
         assert_eq!(unpack_stock_symbol(&{ msg.stock }), "AAPL");
-        assert_eq!(crate::format_price(msg.price), "150.2500");
+        // How that price *renders* is asserted in `presentation::format`, not
+        // here: the wire format owns the scaled integer, not the string.
     }
 
     #[test]

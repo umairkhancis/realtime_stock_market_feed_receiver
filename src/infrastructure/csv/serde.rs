@@ -3,7 +3,8 @@
 //! Two jobs, both against the transmitter's format exactly:
 //!
 //! - **Read** `feed.csv` — the transmitter's ground truth — so what arrived can
-//!   be compared against what was sent, message by message. See [`crate::compare`].
+//!   be compared against what was sent, message by message. See
+//!   [`crate::domain::loss::compare`].
 //! - **Write** what actually arrived, in the *same* 14 columns and the same
 //!   order, so that with zero loss the two files are byte-identical and plain
 //!   `diff` is a complete verification.
@@ -12,20 +13,26 @@
 //! sequence number in slice 2. On the transmitter it is the row's index in the
 //! file; here it is the datagram's index in arrival order. With no loss those
 //! agree, which is the whole point; with loss they diverge from the first gap
-//! onward, which is why [`crate::compare`] exists rather than relying on `diff`.
+//! onward, which is why [`crate::domain::loss::compare`] exists rather than
+//! relying on `diff`.
 //!
 //! Only 'A' and 'F' carry an ASCII ticker, so the `stock` column is empty for
 //! every other type — exactly as on the wire. [`read_symbol_table`] loads the
-//! locate → ticker map the transmitter writes alongside the feed.
+//! locate → ticker map the transmitter writes alongside the feed; what a
+//! receiver then *does* with a locate map is
+//! [`crate::domain::symbols::SymbolMap`], one ring in.
+//!
+//! Everything here is generic over `impl BufRead` / `impl Write` and never
+//! names a path. [`super::store`] is the half that owns `File`.
 
 use std::fmt;
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
-use crate::model::{
-    pack_itch_timestamp, unpack_stock_symbol, ItchAddOrder, ItchAddOrderAttributed, ItchMessage,
-    ItchOrderCancel, ItchOrderDelete, ItchOrderExecuted, ItchOrderExecutedWithPrice,
-    ItchOrderReplace,
+use crate::domain::message::{
+    ItchAddOrder, ItchAddOrderAttributed, ItchMessage, ItchOrderCancel, ItchOrderDelete,
+    ItchOrderExecuted, ItchOrderExecutedWithPrice, ItchOrderReplace, pack_itch_timestamp,
+    unpack_stock_symbol,
 };
 
 /// The header row, and the authority on column order.
@@ -105,8 +112,9 @@ where
 /// Optional. Every message carries a locate but only 'A' and 'F' carry the
 /// ticker, so without this file the receiver can still name a symbol — it just
 /// has to learn the mapping from the add stream, which is what
-/// [`SymbolMap::learn`] does. Real ITCH has the same shape: you build the map
-/// from the Stock Directory messages before the tape means anything.
+/// [`crate::domain::symbols::SymbolMap::learn`] does. Real ITCH has the same
+/// shape: you build the map from the Stock Directory messages before the tape
+/// means anything.
 pub fn read_symbol_table<R: BufRead>(input: R) -> Result<BTreeMap<u16, String>, FeedError> {
     let mut map = BTreeMap::new();
     for (i, line) in input.lines().enumerate() {
@@ -131,61 +139,6 @@ pub fn read_symbol_table<R: BufRead>(input: R) -> Result<BTreeMap<u16, String>, 
         map.insert(locate, ticker.to_string());
     }
     Ok(map)
-}
-
-/// The locate → ticker mapping, however the receiver came by it.
-#[derive(Debug, Clone, Default)]
-pub struct SymbolMap {
-    by_locate: BTreeMap<u16, String>,
-}
-
-impl SymbolMap {
-    pub fn new(by_locate: BTreeMap<u16, String>) -> Self {
-        SymbolMap { by_locate }
-    }
-
-    /// Builds the map from the feed itself, out of the 'A' and 'F' messages.
-    ///
-    /// This is the mapping a receiver has without any out-of-band file, and it
-    /// has a real failure mode worth naming: a symbol that never gets an add
-    /// during the capture stays anonymous, and if the *first* add for a symbol
-    /// is the one that was lost, the map is built from the second one instead —
-    /// which is fine here only because the transmitter never reuses a locate.
-    pub fn learn(msgs: &[ItchMessage]) -> Self {
-        let mut by_locate = BTreeMap::new();
-        for m in msgs {
-            let (locate, stock) = match m {
-                ItchMessage::AddOrder(a) => (a.stock_locate, a.stock),
-                ItchMessage::AddOrderAttributed(a) => (a.stock_locate, a.stock),
-                _ => continue,
-            };
-            by_locate
-                .entry(locate)
-                .or_insert_with(|| unpack_stock_symbol(&stock).to_string());
-        }
-        SymbolMap { by_locate }
-    }
-
-    /// Falls back to naming the locate when the ticker is unknown, rather than
-    /// inventing one or panicking.
-    pub fn name(&self, locate: u16) -> String {
-        self.by_locate
-            .get(&locate)
-            .cloned()
-            .unwrap_or_else(|| format!("locate:{locate}"))
-    }
-
-    pub fn locate_of(&self, ticker: &str) -> Option<u16> {
-        self.by_locate.iter().find(|(_, t)| *t == ticker).map(|(l, _)| *l)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_locate.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.by_locate.len()
-    }
 }
 
 fn render_row(buf: &mut String, seq: u64, msg: &ItchMessage) {
@@ -357,7 +310,7 @@ fn parse_row(line: &str, no: u64) -> Result<ItchMessage, FeedError> {
         }
     };
     let stock = |v: &str| -> Result<[u8; 8], FeedError> {
-        crate::model::pack_stock_symbol(v).ok_or_else(|| FeedError::BadField {
+        crate::domain::message::pack_stock_symbol(v).ok_or_else(|| FeedError::BadField {
             line: no,
             column: "stock",
             value: v.to_string(),
@@ -461,7 +414,8 @@ fn mpid(v: &str) -> Option<[u8; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::synthetic;
+    use crate::domain::fixtures::{drop_every, synthetic};
+    use crate::domain::loss::compare::compare;
 
     fn round_trip(count: u64) -> (Vec<ItchMessage>, Vec<ItchMessage>) {
         let original: Vec<ItchMessage> = synthetic(count as usize);
@@ -488,11 +442,11 @@ mod tests {
     #[test]
     fn csv_round_trip_preserves_the_encoded_bytes() {
         let (original, parsed) = round_trip(5_000);
-        let mut a = [0u8; crate::codec::MAX_MESSAGE_LEN];
-        let mut b = [0u8; crate::codec::MAX_MESSAGE_LEN];
+        let mut a = [0u8; crate::domain::codec::MAX_MESSAGE_LEN];
+        let mut b = [0u8; crate::domain::codec::MAX_MESSAGE_LEN];
         for (x, y) in original.iter().zip(parsed.iter()) {
-            let na = crate::codec::encode(x, &mut a).unwrap();
-            let nb = crate::codec::encode(y, &mut b).unwrap();
+            let na = crate::domain::codec::encode(x, &mut a).unwrap();
+            let nb = crate::domain::codec::encode(y, &mut b).unwrap();
             assert_eq!(a[..na], b[..nb]);
         }
     }
@@ -571,34 +525,57 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map[&1], "AAPL");
         assert_eq!(map[&3], "NVDA");
-
-        let map = SymbolMap::new(map);
-        assert_eq!(map.name(3), "NVDA");
-        assert_eq!(map.locate_of("NVDA"), Some(3));
-        // An unknown locate is named, not guessed at and not a panic.
-        assert_eq!(map.name(99), "locate:99");
-        assert_eq!(map.locate_of("TSLA"), None);
-    }
-
-    #[test]
-    fn a_symbol_map_can_be_learned_from_the_adds_alone() {
-        let msgs = synthetic(5_000);
-        let map = SymbolMap::learn(&msgs);
-        assert_eq!(map.len(), crate::fixtures::TICKERS.len());
-        for (i, ticker) in crate::fixtures::TICKERS.iter().enumerate() {
-            assert_eq!(map.name(i as u16 + 1), *ticker);
-        }
-        // Every message in the feed resolves to a name.
-        for m in &msgs {
-            assert!(!map.name(m.stock_locate()).starts_with("locate:"));
-        }
-    }
-
-    #[test]
-    fn an_empty_symbol_map_still_names_everything() {
-        let map = SymbolMap::default();
-        assert!(map.is_empty());
-        assert_eq!(map.name(7), "locate:7");
+        // The third column is the transmitter's opening price; the receiver
+        // reads the map, not the market.
         assert_eq!(read_symbol_table("".as_bytes()).unwrap().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-layer: the CSV format and the ground-truth comparison together.
+    //
+    // These span `infrastructure::csv` and `domain::loss::compare`, so strictly
+    // they belong in `tests/`, as the transmitter's do. They stay here because
+    // building a known feed needs `domain::fixtures`, which is `#[cfg(test)]`
+    // on purpose — a receiver that ships a feed generator is a receiver that
+    // will eventually be tested against itself. Publishing the fixtures to
+    // reach them from an integration test would cost more than the move buys.
+    // -----------------------------------------------------------------------
+
+    /// The end-to-end promise of the CSV dump: with zero loss, the file this
+    /// receiver writes is byte-identical to the transmitter's.
+    #[test]
+    fn a_lossless_capture_round_trips_to_an_identical_csv() {
+        let sent = synthetic(3_000);
+        let mut ground_truth: Vec<u8> = Vec::new();
+        write_feed(&mut ground_truth, sent.iter().copied()).unwrap();
+
+        // What a perfect capture would write.
+        let received = read_feed(ground_truth.as_slice()).unwrap();
+        let mut dumped: Vec<u8> = Vec::new();
+        write_feed(&mut dumped, received.iter().copied()).unwrap();
+
+        assert_eq!(
+            ground_truth, dumped,
+            "a lossless capture must dump an identical file"
+        );
+        assert!(compare(&sent, &received).is_perfect());
+    }
+
+    /// And with loss, the files diverge — which is why `compare` exists rather
+    /// than relying on `diff`.
+    #[test]
+    fn a_lossy_capture_diverges_from_the_ground_truth_file() {
+        let sent = synthetic(3_000);
+        let (kept, dropped) = drop_every(&sent, 100);
+
+        let mut a: Vec<u8> = Vec::new();
+        let mut b: Vec<u8> = Vec::new();
+        write_feed(&mut a, sent.iter().copied()).unwrap();
+        write_feed(&mut b, kept.iter().copied()).unwrap();
+        assert_ne!(a, b);
+
+        let c = compare(&sent, &kept);
+        assert_eq!(c.missing.len(), dropped.len());
+        assert!(!c.is_perfect());
     }
 }

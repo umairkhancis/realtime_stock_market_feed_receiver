@@ -16,87 +16,20 @@
 //! `D` and `X` allocate no reference and no match number. A lost delete leaves
 //! a phantom order resting in this receiver's book forever; a lost cancel leaves
 //! a share count silently high. Nothing in the stream ever contradicts either.
-//! [`Detection::blind_spot_note`] says so in the report rather than letting a
-//! clean-looking summary imply a clean stream.
+//! [`Detection::unverifiable`] carries that number so the report can say it
+//! out loud rather than letting a clean-looking summary imply a clean stream.
+//! The sentence itself is rendered by
+//! [`crate::presentation::report::blind_spot_note`] — this layer supplies the
+//! counts, not the prose.
 //!
-//! Nothing here hardcodes the transmitter's constants. The transmitter happens
-//! to stride order references by 8 (it runs 8 symbols) and match numbers by 1,
-//! but a receiver that assumes those numbers breaks the day the transmitter
-//! lists a ninth symbol — silently, reporting phantom loss. So the stride is
-//! *inferred* from the data, and a stream that does not fit the inferred stride
-//! is reported as irregular rather than quietly rescaled.
+//! The stride arithmetic all three estimators share lives in
+//! [`super::sequence`], and nothing here hardcodes the transmitter's constants:
+//! see that module for why the stride is inferred rather than assumed.
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::model::ItchMessage;
-
-/// What a monotonic counter in the stream says about what is missing from it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SequenceGaps {
-    /// The step between consecutive values, inferred as the smallest positive
-    /// delta observed. `None` when there were fewer than two values.
-    pub stride: Option<u64>,
-    /// Values that took part in the estimate.
-    pub observed: u64,
-    /// Values the gaps imply were lost.
-    ///
-    /// A gap is only visible *between* two values that arrived, so this
-    /// undercounts by however many were lost before the first surviving value
-    /// or after the last. Per symbol that is a handful of messages; across the
-    /// whole feed it is why the tail of a stream is undetectable.
-    pub missing: u64,
-    /// Values that went backwards — reordering, a restart, or foreign traffic.
-    /// With no session id on the wire the three are indistinguishable.
-    pub backwards: u64,
-    /// Deltas that were not a whole multiple of the stride. Any of these means
-    /// the stride assumption is wrong and `missing` is not trustworthy.
-    pub irregular: u64,
-}
-
-impl SequenceGaps {
-    /// True when the sequence behaved exactly as a uniformly strided counter.
-    pub fn is_clean(&self) -> bool {
-        self.missing == 0 && self.backwards == 0 && self.irregular == 0
-    }
-
-    /// Infers the stride and counts the gaps in an already-ordered sequence.
-    pub fn analyze(values: &[u64]) -> SequenceGaps {
-        let mut gaps = SequenceGaps { observed: values.len() as u64, ..Default::default() };
-        if values.len() < 2 {
-            return gaps;
-        }
-
-        // The stride is the smallest positive step. Deliberately not the GCD:
-        // the GCD divides every delta by construction, so it can never report
-        // an irregular one, which makes it self-confirming. The minimum can be
-        // wrong — and when it is, `irregular` says so.
-        let mut stride = u64::MAX;
-        for w in values.windows(2) {
-            if w[1] > w[0] {
-                stride = stride.min(w[1] - w[0]);
-            }
-        }
-        if stride == u64::MAX {
-            gaps.backwards = (values.len() - 1) as u64;
-            return gaps;
-        }
-        gaps.stride = Some(stride);
-
-        for w in values.windows(2) {
-            if w[1] <= w[0] {
-                gaps.backwards += 1;
-                continue;
-            }
-            let delta = w[1] - w[0];
-            if delta % stride != 0 {
-                gaps.irregular += 1;
-                continue;
-            }
-            gaps.missing += delta / stride - 1;
-        }
-        gaps
-    }
-}
+use crate::domain::loss::sequence::SequenceGaps;
+use crate::domain::message::ItchMessage;
 
 /// What replaying the stream into an order book found.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -155,17 +88,6 @@ impl Detection {
         } else {
             self.unverifiable as f64 / self.total as f64
         }
-    }
-
-    pub fn blind_spot_note(&self) -> String {
-        format!(
-            "{} of {} received messages ({:.1}%) were 'D' or 'X', which carry neither an \
-             order reference of their own nor a match number. Loss among those is invisible \
-             here — a clean report is not proof of a clean stream.",
-            self.unverifiable,
-            self.total,
-            self.blind_fraction() * 100.0,
-        )
     }
 
     pub fn run(msgs: &[ItchMessage]) -> Detection {
@@ -251,7 +173,7 @@ impl Detection {
 }
 
 fn ticker_of(field: &[u8; 8]) -> String {
-    crate::model::unpack_stock_symbol(field).to_string()
+    crate::domain::message::unpack_stock_symbol(field).to_string()
 }
 
 fn add_to_book(
@@ -294,7 +216,7 @@ fn reduce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{drop_every, drop_indices, synthetic, INTERVAL_NANOS, LOCATES};
+    use crate::domain::fixtures::{INTERVAL_NANOS, LOCATES, drop_every, drop_indices, synthetic};
     use std::collections::BTreeMap;
 
     #[test]
@@ -329,7 +251,7 @@ mod tests {
     /// true statement available.
     #[test]
     fn add_and_execution_gaps_count_the_true_loss_exactly() {
-        use crate::model::ItchMessage as M;
+        use crate::domain::message::ItchMessage as M;
         let full = synthetic(20_000);
         let (kept, dropped) = drop_every(&full, 10);
 
@@ -469,94 +391,4 @@ mod tests {
             "a swap must show up as a backwards step"
         );
     }
-
-    #[test]
-    fn analyze_handles_the_degenerate_inputs() {
-        assert_eq!(SequenceGaps::analyze(&[]), SequenceGaps::default());
-        assert_eq!(SequenceGaps::analyze(&[7]).observed, 1);
-        assert_eq!(SequenceGaps::analyze(&[7]).stride, None);
-
-        let clean = SequenceGaps::analyze(&[10, 20, 30, 40]);
-        assert_eq!(clean.stride, Some(10));
-        assert_eq!(clean.missing, 0);
-
-        let gappy = SequenceGaps::analyze(&[10, 20, 50, 60]);
-        assert_eq!(gappy.stride, Some(10));
-        assert_eq!(gappy.missing, 2);
-
-        // A delta that is not a multiple of the stride means the stride guess is
-        // wrong; say so rather than inventing a fractional loss count.
-        let odd = SequenceGaps::analyze(&[10, 20, 35, 45]);
-        assert_eq!(odd.stride, Some(10));
-        assert_eq!(odd.irregular, 1);
-
-        let back = SequenceGaps::analyze(&[10, 20, 15, 25]);
-        assert_eq!(back.backwards, 1);
-
-        // Strictly decreasing: no positive delta exists to infer a stride from.
-        let down = SequenceGaps::analyze(&[30, 20, 10]);
-        assert_eq!(down.stride, None);
-        assert_eq!(down.backwards, 2);
-    }
-
-    /// Uniform loss can defeat stride inference, and that is worth knowing
-    /// rather than pretending otherwise: if *every* gap is the same size, the
-    /// smallest delta is the gap.
-    #[test]
-    fn perfectly_uniform_loss_defeats_the_inference() {
-        let gaps = SequenceGaps::analyze(&[10, 30, 50, 70]);
-        assert_eq!(gaps.stride, Some(20), "with every other value gone, 20 looks like the stride");
-        assert_eq!(gaps.missing, 0, "and so nothing looks missing — a real limit of inference");
-    }
-
-}
-
-/// Prints a detection report.
-///
-/// Ordered so the caveat cannot be missed: what was proven, then what could not
-/// be. A report that led with "no loss detected" would be actively misleading.
-pub fn print_detection(d: &Detection) {
-    println!();
-    println!("== loss detection (from message content alone) ==");
-
-    let line = |name: &str, g: &SequenceGaps| {
-        let stride = g.stride.map(|s| s.to_string()).unwrap_or_else(|| "?".into());
-        println!(
-            "  {name:<22} {:>8} seen, stride {stride:>7}, {:>7} missing, {} backwards, {} irregular",
-            g.observed, g.missing, g.backwards, g.irregular
-        );
-    };
-    line("order references", &d.adds);
-    line("match numbers", &d.executions);
-    line("timestamp grid", &d.timestamps);
-
-    if d.timestamps.irregular > 0 {
-        println!("    timestamps are not on a uniform grid — that estimator does not apply here.");
-        println!("    (It only works because this generator emits on a fixed 100 µs schedule;");
-        println!("     real ITCH timestamps are event times and this column would be noise.)");
-    }
-
-    println!();
-    println!("  book replay          {} adds, {} dangling refs, {} duplicate refs, {} over-executions",
-        d.book.adds, d.book.dangling, d.book.duplicate_refs, d.book.over_execution);
-    println!("  orders left resting  {}", d.book.still_live);
-
-    println!();
-    if d.provable_loss() == 0 {
-        println!("  PROVABLE LOSS   none — every sequence is intact.");
-    } else {
-        println!(
-            "  PROVABLE LOSS   {} messages ({} adds, {} executions)",
-            d.provable_loss(),
-            d.adds.missing,
-            d.executions.missing
-        );
-    }
-    println!("  BLIND SPOT      {}", d.blind_spot_note());
-    println!("                  Gaps are only visible between two values that arrived, so loss");
-    println!("                  before a sequence's first survivor or after its last is not");
-    println!("                  counted either. In particular, if the last N messages never");
-    println!("                  arrive, nothing left in the stream says so.");
-    println!("                  Run with --csv to compare against the transmitter's ground truth,");
-    println!("                  which has neither limitation.");
 }

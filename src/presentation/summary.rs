@@ -8,6 +8,15 @@
 //! table has a different shape, it did not get all the messages — and unlike a
 //! raw count, the *shape* says roughly where.
 //!
+//! This module still interleaves computation with `println!`, and that is a
+//! deliberate hold rather than an oversight. Its pure half — `focus_mids`,
+//! `realized_vol`, `choose_focus` — is already separable and already tested;
+//! splitting it into a `domain::analytics` that returns a struct and a presenter
+//! that renders it is the honest next step, and it was skipped because it is a
+//! real implementation change rather than a structural one. The transmitter's
+//! `docs/clean_arch.md` records the identical decision about its own `summary`,
+//! and the two should move together when either does.
+//!
 //! One deliberate difference from the transmitter's version: nothing here knows
 //! the symbol universe. The transmitter has a static table of eight tickers; the
 //! receiver has whatever it saw. Locates come from every message, tickers only
@@ -17,9 +26,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::feed::SymbolMap;
-use crate::formatter::format_price;
-use crate::model::ItchMessage;
+use crate::domain::message::ItchMessage;
+use crate::domain::symbols::SymbolMap;
+use crate::presentation::format::format_price;
 
 /// Timeline granularity, in message-timestamp nanoseconds.
 const BUCKET_NANOS: u64 = 1_000_000_000;
@@ -324,7 +333,7 @@ fn realized_vol(mids: &[Option<f64>], start: usize, len: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::synthetic;
+    use crate::domain::fixtures::synthetic;
 
     #[test]
     fn clock_renders_the_opening_bell() {

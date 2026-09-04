@@ -1,3 +1,8 @@
+//! The ITCH 5.0 records, and the sum type the rest of the crate passes around.
+//!
+//! Byte-identical to the transmitter's `domain/message.rs`, and that is the
+//! point rather than an accident: the golden vector is the wire contract, and
+//! it means nothing if each side keeps its own idea of the offsets.
 
 // ==========================================
 // 1. ADD ORDER MESSAGES
@@ -232,6 +237,6 @@ impl ItchMessage {
 
     /// Encoded size in bytes — always the fixed size for this message type.
     pub fn wire_len(&self) -> usize {
-        crate::codec::wire_len(self.message_type()).expect("every variant has a wire length")
+        crate::domain::codec::wire_len(self.message_type()).expect("every variant has a wire length")
     }
 }
