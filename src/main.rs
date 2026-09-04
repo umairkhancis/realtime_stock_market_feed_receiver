@@ -1,5 +1,5 @@
 use realtime_stock_market_feed_receiver::formatter::dramatic_display;
-use realtime_stock_market_feed_receiver::{Args, Fallible, listen, listen_one, summarise, verify};
+use realtime_stock_market_feed_receiver::{Fallible, listen, listen_one, summarise, verify};
 use std::env;
 use std::process;
 
@@ -44,27 +44,17 @@ Typical run, receiver first:
 
 pub fn run() -> Fallible {
     let args: Vec<String> = env::args().skip(1).collect();
-
-    let (command, rest) = match args.split_first() {
-        None => {
-            println!("{USAGE}");
-            return Ok(());
-        }
-        Some((c, r)) => (c.as_str(), r),
-    };
+    let command = args.get(0).map(|s| s.as_str()).unwrap_or("help");
 
     match command {
-        "listen" => listen(&Args::parse(rest)?),
-        "summary" => summarise(&Args::parse(rest)?),
-        "verify" => verify(&Args::parse(rest)?),
-        "one" => listen_one(rest.first().map(String::as_str)),
+        "listen" => listen(),
+        "summary" => summarise(),
+        "verify" => verify(),
+        "one" => listen_one(),
         "help" | "-h" | "--help" => {
             println!("{USAGE}");
             Ok(())
         }
-        // Slice 1 took a bare port as its only argument. Keep that working
-        // rather than failing on a command line that used to be correct.
-        other if other.parse::<u16>().is_ok() => listen_one(Some(other)),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}").into()),
     }
 }

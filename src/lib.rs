@@ -38,7 +38,6 @@ pub mod fixtures;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::UdpSocket;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use codec::decode_add_order;
@@ -46,22 +45,22 @@ use compare::{compare, print_comparison};
 use detect::{Detection, print_detection};
 use feed::{SymbolMap, read_feed, read_symbol_table, write_feed};
 use formatter::{format_price, hex};
-use model::{ItchMessage, unpack_stock_symbol};
+use model::unpack_stock_symbol;
 use receive::{ReceiveConfig, receive};
 
 pub const DEFAULT_PORT: u16 = 9000;
+pub const DEFAULT_PATH: &str = "data/feed.symbols.csv";
+pub const TRUTH_PATH: &str = "data/feed.csv";
+pub const DUMP_PATH: &str = "data/received.csv";
 
 pub type Fallible = Result<(), Box<dyn std::error::Error>>;
 
-pub fn listen(args: &Args) -> Fallible {
+pub fn listen() -> Fallible {
     let cfg = ReceiveConfig {
-        port: args.parse_or("port", DEFAULT_PORT)?,
-        startup_timeout: Duration::from_secs(args.parse_or("wait", 60u64)?),
-        idle_timeout: Duration::from_millis(args.parse_or("idle-ms", 2_000u64)?),
-        expect: match args.get("expect") {
-            None => None,
-            Some(v) => Some(v.parse::<u64>().map_err(|_| "--expect expects a number")?),
-        },
+        port: DEFAULT_PORT,
+        startup_timeout: Duration::from_secs(60u64),
+        idle_timeout: Duration::from_millis(2_000u64),
+        expect: None,
         ..Default::default()
     };
 
@@ -86,62 +85,47 @@ pub fn listen(args: &Args) -> Fallible {
         println!("   message, because one datagram is one message)");
     }
 
-    let symbols = load_symbols(args, &messages)?;
-
     // Inference first — it is what a real deployment would have.
     let detection = Detection::run(&messages);
     print_detection(&detection);
 
-    // Then the answer key, when there is one.
-    if let Some(path) = args.get("csv") {
-        let expected = read_feed(BufReader::new(File::open(path)?))?;
-        println!();
-        println!("read {} expected messages from {path}", expected.len());
-        let c = compare(&expected, &messages);
-        print_comparison(&c);
-        if !c.is_perfect() {
-            return Err(format!("verification failed").into());
-        }
+    let expected = read_feed(BufReader::new(File::open(TRUTH_PATH)?))?;
+    println!();
+    println!(
+        "read {} expected messages from {TRUTH_PATH}",
+        expected.len()
+    );
+    let c = compare(&expected, &messages);
+    print_comparison(&c);
+    if !c.is_perfect() {
+        return Err(format!("verification failed").into());
     }
 
-    if let Some(path) = args.get("dump") {
-        let mut out = BufWriter::new(File::create(path)?);
-        let rows = write_feed(&mut out, messages.iter().copied())?;
-        out.flush()?;
-        println!();
-        println!("wrote {rows} received messages to {path}");
-        println!("  (same 14 columns as the transmitter's feed.csv — with zero loss the two");
-        println!("   files are byte-identical, so `diff` is a complete check on its own)");
-    }
+    let mut out = BufWriter::new(File::create(DUMP_PATH)?);
+    let rows = write_feed(&mut out, messages.iter().copied())?;
+    out.flush()?;
+    println!();
+    println!("wrote {rows} received messages to {DUMP_PATH}");
+    println!("  (same 14 columns as the transmitter's feed.csv — with zero loss the two");
+    println!("   files are byte-identical, so `diff` is a complete check on its own)");
 
-    if !args.has("quiet") {
-        println!();
-        summary::summarise(&messages, &symbols, args.get("focus"));
-    }
     Ok(())
 }
 
-pub fn summarise(args: &Args) -> Fallible {
-    let path = args.get("csv").ok_or("summary needs --csv PATH")?;
+pub fn summarise() -> Fallible {
+    let path = DUMP_PATH;
     let messages = read_feed(BufReader::new(File::open(path)?))?;
     println!("read {} messages from {path}", messages.len());
-    let symbols = load_symbols(args, &messages)?;
-    summary::summarise(&messages, &symbols, args.get("focus"));
+    let symbols = load_symbols();
+    summary::summarise(&messages, &symbols, None);
     Ok(())
 }
 
-pub fn verify(args: &Args) -> Fallible {
-    let expected_path = args
-        .get("csv")
-        .ok_or("verify needs --csv PATH (what was sent)")?;
-    let received_path = args
-        .get("received")
-        .ok_or("verify needs --received PATH (what arrived)")?;
-
-    let expected = read_feed(BufReader::new(File::open(expected_path)?))?;
-    let received = read_feed(BufReader::new(File::open(received_path)?))?;
-    println!("expected {} messages from {expected_path}", expected.len());
-    println!("received {} messages from {received_path}", received.len());
+pub fn verify() -> Fallible {
+    let expected = read_feed(BufReader::new(File::open(TRUTH_PATH)?))?;
+    let received = read_feed(BufReader::new(File::open(DUMP_PATH)?))?;
+    println!("expected {} messages from {TRUTH_PATH}", expected.len());
+    println!("received {} messages from {DUMP_PATH}", received.len());
 
     let c = compare(&expected, &received);
     print_comparison(&c);
@@ -149,12 +133,10 @@ pub fn verify(args: &Args) -> Fallible {
 }
 
 /// Slice 1, unchanged in behaviour: one Add Order, printed field by field.
-pub fn listen_one(port: Option<&str>) -> Fallible {
-    let port: u16 = port.unwrap_or("9000").parse()?;
-
+pub fn listen_one() -> Fallible {
     // 0.0.0.0, not 127.0.0.1: binding loopback works perfectly on this machine
     // and silently receives nothing from another one.
-    let sock = UdpSocket::bind(("0.0.0.0", port))?;
+    let sock = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))?;
     println!("listening on {}", sock.local_addr()?);
 
     let mut buf = [0u8; 2048];
@@ -203,136 +185,19 @@ pub fn listen_one(port: Option<&str>) -> Fallible {
 
 /// Resolves the locate → ticker map, preferring an explicit file, then the one
 /// the transmitter writes beside the feed, and finally the add stream itself.
-fn load_symbols(
-    args: &Args,
-    messages: &[ItchMessage],
-) -> Result<SymbolMap, Box<dyn std::error::Error>> {
-    if let Some(path) = args.get("symbols") {
-        let map = read_symbol_table(BufReader::new(File::open(path)?))?;
-        println!("read {} symbols from {path}", map.len());
-        return Ok(SymbolMap::new(map));
-    }
-    if let Some(csv) = args.get("csv") {
-        let beside = symbols_path(Path::new(csv));
-        if beside.exists() {
-            let map = read_symbol_table(BufReader::new(File::open(&beside)?))?;
-            println!("read {} symbols from {}", map.len(), beside.display());
-            return Ok(SymbolMap::new(map));
-        }
-    }
-    // No map on disk: learn it from the adds, the way a receiver with no
-    // out-of-band file has to.
-    Ok(SymbolMap::learn(messages))
-}
+fn load_symbols() -> SymbolMap {
+    let map = read_symbol_table(BufReader::new(File::open(DEFAULT_PATH).unwrap())).unwrap();
+    println!("read {} symbols from {DEFAULT_PATH}", map.len());
 
-/// `data/feed.csv` -> `data/feed.symbols.csv`, matching the transmitter.
-fn symbols_path(feed: &Path) -> PathBuf {
-    let stem = feed
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    feed.with_file_name(format!("{stem}.symbols.csv"))
+    SymbolMap::new(map)
 }
 
 /// A very small `--key value` / `--key=value` parser, matching the
 /// transmitter's so the two command lines feel like one tool.
-pub struct Args {
-    values: Vec<(String, Option<String>)>,
-}
-
-impl Args {
-    pub fn parse(argv: &[String]) -> Result<Args, String> {
-        let mut values = Vec::new();
-        let mut i = 0;
-        while i < argv.len() {
-            let arg = &argv[i];
-            let key = arg
-                .strip_prefix("--")
-                .ok_or_else(|| format!("expected an option starting with --, got {arg:?}"))?;
-            match key.split_once('=') {
-                Some((k, v)) => {
-                    values.push((k.to_string(), Some(v.to_string())));
-                    i += 1;
-                }
-                None => match argv.get(i + 1) {
-                    Some(v) if !v.starts_with("--") => {
-                        values.push((key.to_string(), Some(v.clone())));
-                        i += 2;
-                    }
-                    _ => {
-                        values.push((key.to_string(), None));
-                        i += 1;
-                    }
-                },
-            }
-        }
-        Ok(Args { values })
-    }
-
-    fn get(&self, key: &str) -> Option<&str> {
-        self.values
-            .iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| v.as_deref())
-    }
-
-    fn has(&self, key: &str) -> bool {
-        self.values.iter().any(|(k, _)| k == key)
-    }
-
-    fn parse_or<T: std::str::FromStr>(&self, key: &str, default: T) -> Result<T, String> {
-        match self.get(key) {
-            None => Ok(default),
-            Some(v) => v
-                .parse()
-                .map_err(|_| format!("--{key} expects a number, got {v:?}")),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::{drop_every, synthetic};
-
-    fn argv(s: &[&str]) -> Vec<String> {
-        s.iter().map(|x| x.to_string()).collect()
-    }
-
-    #[test]
-    fn args_accept_both_spellings() {
-        let a = Args::parse(&argv(&["--port", "9001", "--expect=100000", "--quiet"])).unwrap();
-        assert_eq!(a.get("port"), Some("9001"));
-        assert_eq!(a.get("expect"), Some("100000"));
-        assert!(a.has("quiet"));
-        assert_eq!(a.get("quiet"), None);
-        assert!(!a.has("nope"));
-    }
-
-    #[test]
-    fn args_reject_a_stray_positional() {
-        assert!(Args::parse(&argv(&["port", "9000"])).is_err());
-    }
-
-    #[test]
-    fn args_parse_numbers_and_report_bad_ones() {
-        let a = Args::parse(&argv(&["--port", "9000", "--idle-ms", "soon"])).unwrap();
-        assert_eq!(a.parse_or("port", 1u16).unwrap(), 9000);
-        assert_eq!(a.parse_or("missing", 42u64).unwrap(), 42);
-        assert!(a.parse_or("idle-ms", 1u64).is_err());
-    }
-
-    #[test]
-    fn symbols_path_matches_the_transmitters_layout() {
-        assert_eq!(
-            symbols_path(Path::new("data/feed.csv")),
-            Path::new("data/feed.symbols.csv")
-        );
-        assert_eq!(
-            symbols_path(Path::new("run1.csv")),
-            Path::new("run1.symbols.csv")
-        );
-    }
 
     #[test]
     fn a_bare_port_still_means_slice_one() {
